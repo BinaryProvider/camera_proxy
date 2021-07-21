@@ -4,9 +4,10 @@ import time
 import logging
 import argparse
 import threading
+import platform
 from datetime import datetime
-from queue import Queue
-from flask import Flask, send_file, request, Response, abort
+from SimpleQueue import SimpleQueue as Queue, Empty
+from flask import Flask, send_file, request, Response, abort, jsonify
 from PIL import Image
 from camera_stream_manager import CameraStreamManager
 
@@ -40,8 +41,7 @@ def stop_camera_daemon():
 stop_camera_daemon_thread = threading.Thread(target=stop_camera_daemon, name="StopCameraDaemon", daemon=True)
 stop_camera_daemon_thread.start()
 
-@app.route('/api/v1/cameras/<name>/stream', methods=["GET"])
-def get_image_stream_from_camera(name):
+def start_camera_stream(name):
     camera_stream_manager.update_last_accessed_timestamp(name)
     stream = None
     if not camera_stream_manager.is_stream_running(name):
@@ -49,38 +49,67 @@ def get_image_stream_from_camera(name):
     
     if stream is None:
         stream = camera_stream_manager.get_stream_by_name(name)
+    return stream
+
+@app.route('/api/v1/cameras/<name>/info', methods=["GET"])
+def get_camera_info(name):
+    camera_info = camera_stream_manager.get_info(name)
+    return jsonify(camera_info | { "name": name, "time": datetime.now() })
+
+@app.route('/api/v1/cameras/<name>/stream', methods=["GET"])
+def get_image_stream_from_camera(name):
+    stream = start_camera_stream(name)
+    
     if stream is None:
         abort(404)
     decoder = stream["decoder"]
     queue = Queue()
-    decoder.add_frame_callback(lambda x: queue.put(x))
+    frame_callback = lambda x: queue.put(x)
+    decoder.add_frame_callback(frame_callback)
 
     def frame_generator():
-        while True:
-            camera_stream_manager.update_last_accessed_timestamp(name)
-            frame = queue.get()
-            output = io.BytesIO()
-            frame.save(output, 'JPEG')
-            len = output.tell()
-            output.seek(0)
-            yield (b'--frame\r\n'
-                b'Content-Type: image/jpeg\r\nContent-Length: ' + str(len).encode() + b'\r\n\r\n' + output.read() + b'\r\n')
+        try:
+            
+            frameCounter = 0
+            lasFrameSentTime = datetime.now()
+            while True:
+                try:
+                    camera_stream_manager.update_last_accessed_timestamp(name)
+
+                    frames = queue.get(timeout=15)
+                    
+                    for frame in frames:
+                        output = io.BytesIO()
+                        frame.save(output, 'JPEG')
+                        length = output.tell()
+                        
+                        yield (b'--frame\r\n'
+                            b'Content-Type: image/jpeg\r\nContent-Length: ' + str(length).encode() + b'\r\n\r\n' + output.getvalue() + b'\r\n')
+                        
+
+                    frameCounter += len(frames)
+
+                    elapsed = (datetime.now() - lasFrameSentTime).total_seconds()
+                    if elapsed >= 1:
+                        logger.info("FPS approx: %.2f, Queue Size: %d", round(frameCounter/elapsed, 2), queue.qsize())
+                        frameCounter = 0
+                        lasFrameSentTime = datetime.now()
+                except Empty:
+                    time.sleep(0.1)
+                    continue             
+        finally:
+            decoder.remove_frame_callback(frame_callback)
     return Response(frame_generator(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
 @app.route('/api/v1/cameras/<name>', methods=["GET"])
 def get_image_from_camera(name):
-    thumbnail_requested = request.args.get('thumbnail') != None
-
-    camera_stream_manager.update_last_accessed_timestamp(name)
-    stream = None
-    if not camera_stream_manager.is_stream_running(name):
-        stream = camera_stream_manager.start_decoding_camera_stream(name)
-
-    if stream is None:
-        stream = camera_stream_manager.get_stream_by_name(name)
+    stream = start_camera_stream(name)
+    
     if stream is None:
         abort(404)
     decoder = stream["decoder"]
+
+    thumbnail_requested = request.args.get('thumbnail') != None
 
     i = 0
     while i < 100:
@@ -111,5 +140,26 @@ if __name__ == "__main__":
     args = parser.parse_args()
     debug = args.debug
     port = args.port
-    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO)
+
+    logging.basicConfig(level=logging.DEBUG if debug else logging.INFO, format="[%(threadName)s-%(tid)s] %(message)s")
+
+    import threading, ctypes
+    # Define get tid function
+    def gettid():
+        """Get TID as displayed by htop."""
+        libc = 'libc.so.6'
+        for cmd in (186, 224, 178):
+            tid = ctypes.CDLL(libc).syscall(cmd)
+            if tid != -1:
+                return tid
+
+    login_record_factory = logging.getLogRecordFactory()
+    def record_factory(*args, **kwargs):
+        record = login_record_factory(*args, **kwargs)
+        record.tid = gettid() if platform.system().startswith(u'Linux') else record.thread
+        return record
+
+    logging.setLogRecordFactory(record_factory)
+
     app.run(debug=debug, port=port, host='0.0.0.0')
+

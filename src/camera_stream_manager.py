@@ -1,4 +1,4 @@
-import threading
+from threading import Thread, RLock
 from datetime import datetime
 from camera import Camera
 from decoder import Decoder
@@ -7,8 +7,25 @@ class CameraStreamManager:
     def __init__(self, camera_settings):
         self.camera_settings = camera_settings
         self.streams = []
-        self.stream_lock = threading.RLock()
+        self.stream_lock = RLock()
     
+    def get_info(self, camera_name):
+        camera_settings = self.get_camera_settings_by_name(camera_name)
+        if camera_settings is None:
+            return None
+
+        # read camera configuration passed from settings.json
+        device_sid = camera_settings["deviceSid"]
+        username = camera_settings["username"]
+        password = camera_settings["password"]
+        backup_image = camera_settings["backupImage"] if "backupImage" in camera_settings else None
+        ipaddress = camera_settings["ipaddress"] if "ipaddress" in camera_settings else None
+        comm_port = camera_settings["comm_port"] if "comm_port" in camera_settings else 0
+        
+        camera = Camera(device_sid, username, password, ipaddress, comm_port)
+
+        return camera.get_info()
+
     def start_decoding_camera_stream(self, camera_name):
         camera_settings = self.get_camera_settings_by_name(camera_name)
         if camera_settings is None:
@@ -18,23 +35,30 @@ class CameraStreamManager:
         if stream is not None:
             return stream
         
+        # read camera configuration passed from settings.json
         device_sid = camera_settings["deviceSid"]
         username = camera_settings["username"]
         password = camera_settings["password"]
         backup_image = camera_settings["backupImage"] if "backupImage" in camera_settings else None
+        ipaddress = camera_settings["ipaddress"] if "ipaddress" in camera_settings else None
+        comm_port = camera_settings["comm_port"] if "comm_port" in camera_settings else 0
         
-        camera = Camera(device_sid, username, password)
+        camera = Camera(device_sid, username, password, ipaddress, comm_port)
         decoder = Decoder()
         def start_camera():
-            camera.start(lambda data: decoder.handle_packet(data))
+            camera.start(lambda video_data, audio_data: decoder.queue_data(video_data))
         
-        camera_thread = threading.Thread(target=start_camera, name="CameraThread", daemon=True)
+        camera_thread = Thread(target=start_camera, name="CameraThread", daemon=True)
         camera_thread.start()
+
+        decoder_thread = Thread(target=decoder.process, name="DecoderThread", daemon=True)
+        decoder_thread.start()
 
         stream = {}
         stream["name"] = camera_name
         stream["camera"] = camera
         stream["camera_thread"] = camera_thread
+        stream["decoder_thread"] = decoder_thread
         stream["decoder"] = decoder
         stream["last_accessed"] = datetime.now()
         stream["backup_image"] = backup_image
@@ -52,7 +76,11 @@ class CameraStreamManager:
         camera = stream["camera"]
         camera_thread = stream["camera_thread"]
         camera.stop()
+        decoder = stream["decoder"]
+        decoder.stop()
+        decoder_thread = stream["decoder_thread"]
         camera_thread.join()
+        decoder_thread.join()
         return True
     
     def is_stream_running(self, camera_name):
