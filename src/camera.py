@@ -20,6 +20,84 @@ class Camera:
         self.ipaddress = ipaddress
         self.comm_port = comm_port
 
+    def get_info(self):
+        client_id = random.randint(0, MAX_INT32)
+
+        udp_layer = baichuan_udp_layer.BaichuanUdpLayer(self.device_sid, client_id, self.ipaddress,self.comm_port)
+        control_layer = baichuan_control_layer.BaichuanControlLayer(self.username, self.password, udp_layer)
+
+        udp_layer.discover_device()
+
+        logger.info("Sending legacy login packet")
+
+        control_layer.send_legacy_login_packet()
+
+        logger.info("Receiving nonce packet")
+        nonce = None
+        while nonce == None:
+            (modern_message_id, _, message, _) = control_layer.recv_packet()
+            if modern_message_id != baichuan_control_layer.BAICHUAN_MESSAGE_ID_LOGIN:
+                continue
+            xml_root = ElementTree.fromstring(message)
+            nonce_element = xml_root.find("Encryption/nonce")
+            if nonce_element != None:
+                nonce = nonce_element.text
+        logger.info("Received nonce: %s", nonce)    
+
+        logger.info("Sending modern login packet")
+        control_layer.send_modern_login_packet(nonce)
+        while True:
+            (modern_message_id, _, message, binary_data) = control_layer.recv_packet()
+            if modern_message_id == baichuan_control_layer.BAICHUAN_MESSAGE_ID_VIDEO_INPUT:
+                break
+
+        i = 0
+        udp_layer.socket.settimeout(5)
+        retry = 10
+        isLoaded = False
+        while retry > 0 and not isLoaded:
+            try:
+                (modern_message_id, _, message, binary_data) = control_layer.recv_packet()
+                I_FRAME = 0x63643030
+                P_FRAME = 0x63643130
+                VIDEO_INFO_V1 = 0x31303031
+                VIDEO_INFO_V2 = 0x32303031
+                BC_AAC_FRAME = 0x62773530
+                I_FRAME_HEADER_SIZE = 32
+                P_FRAME_HEADER_SIZE = 24
+                decoded_message = message.decode("utf-8")
+                xml_root = ElementTree.fromstring(decoded_message)
+                channelId = xml_root.find("BatteryList/BatteryInfo/channelId")
+                chargeStatus = xml_root.find("BatteryList/BatteryInfo/chargeStatus")
+                adapterStatus = xml_root.find("BatteryList/BatteryInfo/adapterStatus")
+                voltage = xml_root.find("BatteryList/BatteryInfo/voltage")
+                current = xml_root.find("BatteryList/BatteryInfo/current")
+                temperature = xml_root.find("BatteryList/BatteryInfo/temperature")
+                lowPower = xml_root.find("BatteryList/BatteryInfo/lowPower")
+                batteryVersion = xml_root.find("BatteryList/BatteryInfo/batteryVersion")
+                batteryPercent = xml_root.find("BatteryList/BatteryInfo/batteryPercent")
+                isLoaded = True
+                return {
+                    "channelId": int(channelId.text),
+                    "chargeStatus": chargeStatus.text,
+                    "adapterStatus": adapterStatus.text,
+                    "voltage":int(voltage.text),
+                    "current": int(current.text),
+                    "temperature": int(temperature.text),
+                    "lowPower": bool(lowPower.text),
+                    "batteryVersion": int(batteryVersion.text),
+                    "batteryPercent": int(batteryPercent.text)
+                }
+
+            except socket.timeout as ex:
+                if retry <= 0:
+                    raise ex
+                retry-=1
+                control_layer.start_video(baichuan_control_layer.MAINSTREAM)
+                continue
+
+        return "walla bralla"
+
     def start(self, handle_video_and_audio_stream):
         self.is_running = True
         while self.is_running:
@@ -80,6 +158,7 @@ class Camera:
                 BC_AAC_FRAME = 0x62773530
                 I_FRAME_HEADER_SIZE = 32
                 P_FRAME_HEADER_SIZE = 24
+                print(message.decode("utf-8"))
                 if modern_message_id == baichuan_control_layer.BAICHUAN_MESSAGE_ID_VIDEO and len(binary_data) > 0:
                     video_data = binary_data
                     (frame_magic, ) = struct.unpack_from("<i", video_data)
@@ -114,11 +193,11 @@ class Camera:
                             video_stream += video_stream_data
                     elif frame_magic == VIDEO_INFO_V1 or frame_magic == VIDEO_INFO_V2:
                         # print("VIDEO_INFO")
-                        pass
+                      pass
                     elif frame_magic == BC_AAC_FRAME:
                         BC_AAC_FRAME_HEADER_SIZE = 8
                         (audio_magic, l_size, r_size) = struct.unpack_from("<iHH", binary_data)
-                        logger.debug("AAC Frame found (l_size %d, r_size %d)", l_size, r_size)
+                        logger.debug("AAC Frame found (l_size %d,  p r_size %d)", l_size, r_size)
                         audio_stream += binary_data[BC_AAC_FRAME_HEADER_SIZE: BC_AAC_FRAME_HEADER_SIZE + l_size + r_size]
                     else:
                         video_stream += binary_data

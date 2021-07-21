@@ -9,6 +9,23 @@ class CameraStreamManager:
         self.streams = []
         self.stream_lock = RLock()
     
+    def get_info(self, camera_name):
+        camera_settings = self.get_camera_settings_by_name(camera_name)
+        if camera_settings is None:
+            return None
+
+        # read camera configuration passed from settings.json
+        device_sid = camera_settings["deviceSid"]
+        username = camera_settings["username"]
+        password = camera_settings["password"]
+        backup_image = camera_settings["backupImage"] if "backupImage" in camera_settings else None
+        ipaddress = camera_settings["ipaddress"] if "ipaddress" in camera_settings else None
+        comm_port = camera_settings["comm_port"] if "comm_port" in camera_settings else 0
+        
+        camera = Camera(device_sid, username, password, ipaddress, comm_port)
+
+        return camera.get_info()
+
     def start_decoding_camera_stream(self, camera_name):
         camera_settings = self.get_camera_settings_by_name(camera_name)
         if camera_settings is None:

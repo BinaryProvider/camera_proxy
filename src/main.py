@@ -7,7 +7,7 @@ import threading
 import platform
 from datetime import datetime
 from SimpleQueue import SimpleQueue as Queue, Empty
-from flask import Flask, send_file, request, Response, abort
+from flask import Flask, send_file, request, Response, abort, jsonify
 from PIL import Image
 from camera_stream_manager import CameraStreamManager
 
@@ -50,6 +50,11 @@ def start_camera_stream(name):
     if stream is None:
         stream = camera_stream_manager.get_stream_by_name(name)
     return stream
+
+@app.route('/api/v1/cameras/<name>/info', methods=["GET"])
+def get_camera_info(name):
+    camera_info = camera_stream_manager.get_info(name)
+    return jsonify(camera_info | { "name": name, "time": datetime.now() })
 
 @app.route('/api/v1/cameras/<name>/stream', methods=["GET"])
 def get_image_stream_from_camera(name):
