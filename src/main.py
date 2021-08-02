@@ -21,7 +21,7 @@ def load_settings_from_file(filename):
         settings = json.load(settings_file)
     return settings
 
-settings = load_settings_from_file("./config/settings.json")
+settings = load_settings_from_file("settings.json")
 camera_settings = settings["cameras"]
 
 camera_stream_manager = CameraStreamManager(camera_settings)
